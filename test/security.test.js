@@ -512,3 +512,56 @@ test('CVE-2026-75899: host conversion failures are not treated as comparable URL
     'resolve propagates a host conversion failure'
   )
 })
+
+test('CVE-2026-75975: malformed bracketed IP literals are not truncated into a different address', (t) => {
+  const cases = [
+    ['http://[::not-valid]/private', '[::not-valid]', 'http://[::]/private'],
+    ['http://[fc00::not-hex]/private', '[fc00::not-hex]', 'http://[fc00::]/private'],
+    ['http://[1:2:3:4:5:6:7:8:9]/private', '[1:2:3:4:5:6:7:8:9]', 'http://[1:2:3:4:5:6:7:8]/private']
+  ]
+
+  t.plan(cases.length * 5)
+
+  cases.forEach(([uri, host, truncated]) => {
+    const parsed = fastURI.parse(uri)
+    t.equal(parsed.error, 'URI host is malformed.', `parse rejects ${uri}`)
+    t.equal(parsed.host, host, `parse keeps the original host of ${uri}`)
+    t.equal(fastURI.normalize(uri), uri, `normalize does not rewrite ${uri}`)
+    t.equal(fastURI.equal(uri, truncated), false, `${uri} != ${truncated}`)
+    t.throws(() => fastURI.resolve(uri, 'child'), /URI host is malformed\./, `resolve rejects ${uri}`)
+  })
+})
+
+test('CVE-2026-75975: nested bracket hosts are rejected instead of being rewritten', (t) => {
+  const uri = 'http://[[fe80::1]/private'
+  const parsed = fastURI.parse(uri)
+
+  t.plan(6)
+  t.equal(parsed.error, 'URI host is malformed.', 'parse rejects the nested bracket host')
+  t.equal(parsed.host, '[[fe80::1]', 'parse does not strip the inner bracket')
+  t.equal(fastURI.normalize(uri), uri, 'normalize does not rewrite to [fe80::1]')
+  t.equal(fastURI.equal(uri, 'http://[fe80::1]/private'), false, 'equal does not match [fe80::1]')
+  t.throws(() => fastURI.resolve(uri, 'child'), /URI host is malformed\./, 'resolve rejects the base')
+  t.throws(() => fastURI.resolve('http://example.com/', '//[[fe80::1]/private'), /URI host is malformed\./, 'resolve rejects the reference')
+})
+
+test('CVE-2026-75975: unterminated bracket hosts still fail host conversion in resolve', (t) => {
+  t.plan(2)
+  t.throws(
+    () => fastURI.resolve('http://[fe80/', 'child'),
+    /Host's domain name can not be converted to ASCII/,
+    'an unterminated base host is not waved through as an IP literal'
+  )
+  t.throws(
+    () => fastURI.resolve('http://example.com/', '//[fe80/private'),
+    /Host's domain name can not be converted to ASCII/,
+    'an unterminated reference host is not waved through as an IP literal'
+  )
+})
+
+test('CVE-2026-75975: valid IPvFuture literals resolve without host conversion', (t) => {
+  t.plan(3)
+  t.equal(fastURI.resolve('http://example.com/', '//[v1.example]/x'), 'http://[v1.example]/x', 'IPvFuture reference')
+  t.equal(fastURI.resolve('http://[v1.example]/a/b', 'c'), 'http://[v1.example]/a/c', 'IPvFuture base')
+  t.equal(fastURI.equal('http://[v1.example]/', 'http://[V1.EXAMPLE]/'), true, 'IPvFuture compares case-insensitively')
+})
