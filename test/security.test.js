@@ -545,16 +545,16 @@ test('CVE-2026-75975: nested bracket hosts are rejected instead of being rewritt
   t.throws(() => fastURI.resolve('http://example.com/', '//[[fe80::1]/private'), /URI host is malformed\./, 'resolve rejects the reference')
 })
 
-test('CVE-2026-75975: unterminated bracket hosts still fail host conversion in resolve', (t) => {
+test('CVE-2026-75975: unterminated bracket hosts are rejected in resolve', (t) => {
   t.plan(2)
   t.throws(
     () => fastURI.resolve('http://[fe80/', 'child'),
-    /Host's domain name can not be converted to ASCII/,
+    /URI host is malformed\./,
     'an unterminated base host is not waved through as an IP literal'
   )
   t.throws(
     () => fastURI.resolve('http://example.com/', '//[fe80/private'),
-    /Host's domain name can not be converted to ASCII/,
+    /URI host is malformed\./,
     'an unterminated reference host is not waved through as an IP literal'
   )
 })
