@@ -503,16 +503,20 @@ function parseWithStatus (uri, opts) {
     // convert Unicode IDN -> ASCII IDN when the effective scheme uses domain hosts
     malformedHost = canonicalizeHost(parsed, options, schemeHandler, isIP)
 
-    if (!schemeHandler || (schemeHandler && !schemeHandler.skipNormalize)) {
-      if (uri.indexOf('%') !== -1) {
-        if (parsed.host !== undefined && !malformedIPLiteral) {
-          // Decode only current unreserved escapes, once. Using unescape() here
-          // decodes every escape and lets a nested escape (e.g. %252e -> %2e -> .)
-          // reparse as a live delimiter, redirecting to a different host.
-          const host = isIP ? parsed.host : normalizePercentEncoding(parsed.host, true)
-          parsed.host = reescapeHostDelimiters(host, isIP)
-        }
+    if (uri.indexOf('%') !== -1 && parsed.host !== undefined && !malformedIPLiteral) {
+      // Decode only current unreserved escapes, once. Using unescape() here
+      // decodes every escape and lets a nested escape (e.g. %252e -> %2e -> .)
+      // reparse as a live delimiter, redirecting to a different host.
+      let host = isIP ? parsed.host : normalizePercentEncoding(parsed.host, true)
+      if (!isIP) {
+        // Fold reg-name case after decoding unreserved octets. The second
+        // pass only restores uppercase hex in escapes that remain encoded.
+        host = normalizePercentEncoding(host.toLowerCase())
       }
+      parsed.host = reescapeHostDelimiters(host, isIP)
+    }
+
+    if (!schemeHandler || (schemeHandler && !schemeHandler.skipNormalize)) {
       if (parsed.path) {
         parsed.path = normalizePathEncoding(parsed.path)
       }
