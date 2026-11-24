@@ -565,3 +565,71 @@ test('CVE-2026-75975: valid IPvFuture literals resolve without host conversion',
   t.equal(fastURI.resolve('http://[v1.example]/a/b', 'c'), 'http://[v1.example]/a/c', 'IPvFuture base')
   t.equal(fastURI.equal('http://[v1.example]/', 'http://[V1.EXAMPLE]/'), true, 'IPvFuture compares case-insensitively')
 })
+
+test('CVE-2026-76172: a scheme that decodes into reserved delimiters is rejected', (t) => {
+  const malformed = [
+    '%2f%2fevil.example:/pwn',
+    '%2F%2Fevil.example:/pwn',
+    'ht%74p%2f%2fevil.example:/x'
+  ]
+
+  t.plan(malformed.length * 2)
+
+  malformed.forEach((uri) => {
+    t.equal(fastURI.parse(uri).error, 'URI scheme is malformed.', `parse rejects ${uri}`)
+    t.equal(fastURI.normalize(uri), uri, `normalize preserves the failing input ${uri}`)
+  })
+})
+
+test('CVE-2026-76172: resolve throws when a component scheme decodes into delimiters', (t) => {
+  t.plan(2)
+  t.throws(
+    () => fastURI.resolve('%2f%2fevil.example:/pwn', 'child'),
+    /URI scheme is malformed/,
+    'resolve rejects a malformed base scheme'
+  )
+  t.throws(
+    () => fastURI.serialize({ scheme: '%2f%2fevil.example', path: '/pwn' }),
+    /URI scheme is malformed/,
+    'serialize rejects a component scheme that decodes to delimiters'
+  )
+})
+
+test('CVE-2026-76172: a scheme that decodes to a valid scheme is still accepted', (t) => {
+  t.plan(2)
+  t.equal(fastURI.parse('htt%70://example.com/').scheme, 'http', 'harmless encoded scheme decodes to http')
+  t.equal(fastURI.normalize('ht%74ps://example.com:443/'), 'https://example.com/', 'decoded scheme selects its handler')
+})
+
+test('CVE-2026-76172: no API emits a delimiter-bearing scheme that reparses as an authority', (t) => {
+  t.plan(9)
+  t.throws(
+    () => fastURI.resolve('http://example.com/', '%2f%2fevil.example:/pwn'),
+    /URI scheme is malformed/,
+    'resolve rejects a malformed reference scheme'
+  )
+  t.throws(
+    () => fastURI.serialize({ scheme: '//evil.example', path: '/pwn' }),
+    /URI scheme is malformed/,
+    'serialize rejects a raw component scheme containing delimiters'
+  )
+  t.throws(
+    () => fastURI.normalize({ scheme: '%2f%2fevil.example', path: '/pwn' }),
+    /URI scheme is malformed/,
+    'normalize rejects a component scheme that decodes to delimiters'
+  )
+  t.throws(
+    () => fastURI.resolveComponent(
+      { scheme: 'http', host: 'example.com', path: '/' },
+      { scheme: '%2f%2fevil.example', path: '/pwn' }
+    ),
+    /URI scheme is malformed/,
+    'resolveComponent rejects a relative component scheme that decodes to delimiters'
+  )
+  t.notEqual(fastURI.parse('%2f%2fevil.example:/pwn').scheme, '//evil.example', 'parse does not decode the scheme into delimiters')
+  t.equal(fastURI.equal('%2f%2fevil.example:/pwn', '%2f%2fevil.example:/pwn'), false, 'equal fails closed on malformed string schemes')
+  t.equal(fastURI.equal('%2f%2fevil.example:/pwn', '//evil.example:/pwn'), false, 'equal does not match the reparsed authority')
+  const component = { scheme: '%2f%2fevil.example', path: '/pwn' }
+  t.equal(fastURI.equal(component, component), false, 'equal fails closed on malformed component schemes')
+  t.equal(fastURI.equal(component, 'http://x/'), false, 'equal does not throw on malformed component schemes')
+})

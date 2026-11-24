@@ -3,6 +3,24 @@
 const { normalizeIPv6, removeDotSegments, recomposeAuthority, normalizePercentEncoding, normalizePathEncoding, escapePreservingEscapes, reescapeHostDelimiters, isIPv4, nonSimpleDomain } = require('./lib/utils')
 const { SCHEMES, getSchemeHandler } = require('./lib/schemes')
 
+const VALID_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*$/u
+const MALFORMED_SCHEME_ERROR = 'URI scheme is malformed.'
+
+/**
+ * Decode a scheme once and require it to stay a valid RFC 3986 scheme. Rejects
+ * a scheme that decodes into reserved delimiters (e.g. "%2f%2f").
+ *
+ * @param {string} scheme
+ * @returns {string}
+ */
+function decodeValidScheme (scheme) {
+  const decodedScheme = unescape(String(scheme))
+  if (!VALID_SCHEME.test(decodedScheme)) {
+    throw new TypeError(MALFORMED_SCHEME_ERROR)
+  }
+  return decodedScheme
+}
+
 /**
  * @template {import('./types/index').URIComponent|string} T
  * @param {T} uri
@@ -30,13 +48,15 @@ function resolve (baseURI, relativeURI, options) {
     parsed: baseParsed,
     malformedAuthorityOrPort: baseMalformed,
     malformedReferenceEdge: baseMalformedReferenceEdge,
-    malformedHost: baseMalformedHost
+    malformedHost: baseMalformedHost,
+    malformedScheme: baseMalformedScheme
   } = parseWithStatus(baseURI, schemelessOptions)
   const {
     parsed: relativeParsed,
     malformedAuthorityOrPort: relativeMalformed,
     malformedReferenceEdge: relativeMalformedReferenceEdge,
-    malformedHost: relativeMalformedHost
+    malformedHost: relativeMalformedHost,
+    malformedScheme: relativeMalformedScheme
   } = parseWithStatus(relativeURI, schemelessOptions)
   if (
     baseMalformed ||
@@ -44,7 +64,9 @@ function resolve (baseURI, relativeURI, options) {
     baseMalformedReferenceEdge ||
     relativeMalformedReferenceEdge ||
     baseMalformedHost ||
-    relativeMalformedHost
+    relativeMalformedHost ||
+    baseMalformedScheme ||
+    relativeMalformedScheme
   ) {
     throw new Error(baseParsed.error || relativeParsed.error || 'URI is malformed.')
   }
@@ -185,6 +207,10 @@ function serialize (cmpts, opts) {
   const options = Object.assign({}, opts)
   const uriTokens = []
 
+  if (component.scheme) {
+    component.scheme = decodeValidScheme(component.scheme)
+  }
+
   // find scheme handler
   const schemeHandler = getSchemeHandler(options.scheme || component.scheme)
 
@@ -204,6 +230,8 @@ function serialize (cmpts, opts) {
   }
 
   if (options.reference !== 'suffix' && component.scheme) {
+    // Scheme handlers may replace the scheme during serialization.
+    component.scheme = decodeValidScheme(component.scheme)
     uriTokens.push(component.scheme, ':')
   }
 
@@ -325,7 +353,7 @@ function canonicalizeHost (parsed, options, schemeHandler, isIP) {
 /**
  * @param {string} uri
  * @param {import('./types/index').Options} [opts]
- * @returns {{ parsed: import('./types/index').URIComponent, malformedAuthorityOrPort: boolean, malformedReferenceEdge: boolean, malformedHost: boolean }}
+ * @returns {{ parsed: import('./types/index').URIComponent, malformedAuthorityOrPort: boolean, malformedReferenceEdge: boolean, malformedHost: boolean, malformedScheme: boolean }}
  */
 function parseWithStatus (uri, opts) {
   const options = Object.assign({}, opts)
@@ -343,6 +371,7 @@ function parseWithStatus (uri, opts) {
   let malformedAuthorityOrPort = false
   let malformedHost = false
   let malformedIPLiteral = false
+  let malformedScheme = false
   // Check the caller's original reference before suffix mode prepends a scheme
   // or authority marker and turns its leading edge into interior data.
   const malformedReferenceEdge = uri.length !== 0 && (
@@ -410,6 +439,21 @@ function parseWithStatus (uri, opts) {
     parsed.query = matches[7]
     parsed.fragment = matches[8]
 
+    if (parsed.scheme !== undefined) {
+      // Decode the scheme once and require it to stay a valid RFC 3986 scheme.
+      // A scheme that decodes into reserved delimiters (e.g. "%2f%2f") would
+      // otherwise let normalize()/resolve() emit a string that reparses with a
+      // different authority (host-allowlist bypass).
+      const decodedScheme = unescape(parsed.scheme)
+      if (VALID_SCHEME.test(decodedScheme)) {
+        // 3.1.4 preserves the scheme's case; handler lookup is case-insensitive.
+        parsed.scheme = decodedScheme
+      } else {
+        parsed.error = parsed.error || MALFORMED_SCHEME_ERROR
+        malformedScheme = true
+      }
+    }
+
     // fix port number
     if (isNaN(parsed.port)) {
       parsed.port = matches[5]
@@ -461,9 +505,6 @@ function parseWithStatus (uri, opts) {
 
     if (!schemeHandler || (schemeHandler && !schemeHandler.skipNormalize)) {
       if (uri.indexOf('%') !== -1) {
-        if (parsed.scheme !== undefined) {
-          parsed.scheme = unescape(parsed.scheme)
-        }
         if (parsed.host !== undefined && !malformedIPLiteral) {
           // Decode only current unreserved escapes, once. Using unescape() here
           // decodes every escape and lets a nested escape (e.g. %252e -> %2e -> .)
@@ -491,7 +532,7 @@ function parseWithStatus (uri, opts) {
   } else {
     parsed.error = parsed.error || 'URI can not be parsed.'
   }
-  return { parsed, malformedAuthorityOrPort, malformedReferenceEdge, malformedHost }
+  return { parsed, malformedAuthorityOrPort, malformedReferenceEdge, malformedHost, malformedScheme }
 }
 
 /**
@@ -515,15 +556,16 @@ function normalizeString (uri, opts) {
 /**
  * @param {string} uri
  * @param {import('./types/index').Options} [opts]
- * @returns {{ normalized: string, malformedAuthorityOrPort: boolean, malformedReferenceEdge: boolean, malformedHost: boolean }}
+ * @returns {{ normalized: string, malformedAuthorityOrPort: boolean, malformedReferenceEdge: boolean, malformedHost: boolean, malformedScheme: boolean }}
  */
 function normalizeStringWithStatus (uri, opts) {
-  const { parsed, malformedAuthorityOrPort, malformedReferenceEdge, malformedHost } = parseWithStatus(uri, opts)
+  const { parsed, malformedAuthorityOrPort, malformedReferenceEdge, malformedHost, malformedScheme } = parseWithStatus(uri, opts)
   return {
-    normalized: malformedAuthorityOrPort || malformedReferenceEdge || malformedHost ? uri : serialize(parsed, opts),
+    normalized: malformedAuthorityOrPort || malformedReferenceEdge || malformedHost || malformedScheme ? uri : serialize(parsed, opts),
     malformedAuthorityOrPort,
     malformedReferenceEdge,
-    malformedHost
+    malformedHost,
+    malformedScheme
   }
 }
 
@@ -534,12 +576,18 @@ function normalizeStringWithStatus (uri, opts) {
  */
 function normalizeComparableURI (uri, opts) {
   if (typeof uri === 'string') {
-    const { normalized, malformedAuthorityOrPort, malformedReferenceEdge, malformedHost } = normalizeStringWithStatus(uri, opts)
-    return malformedAuthorityOrPort || malformedReferenceEdge || malformedHost ? undefined : normalized
+    const { normalized, malformedAuthorityOrPort, malformedReferenceEdge, malformedHost, malformedScheme } = normalizeStringWithStatus(uri, opts)
+    return malformedAuthorityOrPort || malformedReferenceEdge || malformedHost || malformedScheme ? undefined : normalized
   }
 
   if (typeof uri === 'object') {
-    return serialize(uri, opts)
+    try {
+      return serialize(uri, opts)
+    } catch (e) {
+      // A component whose scheme decodes into reserved delimiters can not be
+      // compared safely; fail closed.
+      return undefined
+    }
   }
 }
 
