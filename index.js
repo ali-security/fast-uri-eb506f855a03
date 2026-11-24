@@ -26,7 +26,35 @@ function normalize (uri, options) {
  */
 function resolve (baseURI, relativeURI, options) {
   const schemelessOptions = options ? Object.assign({ scheme: 'null' }, options) : { scheme: 'null' }
-  const resolved = resolveComponent(parse(baseURI, schemelessOptions), parse(relativeURI, schemelessOptions), schemelessOptions, true)
+  const {
+    parsed: baseParsed,
+    malformedAuthorityOrPort: baseMalformed,
+    malformedReferenceEdge: baseMalformedReferenceEdge
+  } = parseWithStatus(baseURI, schemelessOptions)
+  const {
+    parsed: relativeParsed,
+    malformedAuthorityOrPort: relativeMalformed,
+    malformedReferenceEdge: relativeMalformedReferenceEdge
+  } = parseWithStatus(relativeURI, schemelessOptions)
+  if (
+    baseMalformed ||
+    relativeMalformed ||
+    baseMalformedReferenceEdge ||
+    relativeMalformedReferenceEdge
+  ) {
+    throw new Error(baseParsed.error || relativeParsed.error || 'URI is malformed.')
+  }
+  const resolved = resolveComponent(baseParsed, relativeParsed, schemelessOptions, true)
+  // Inputs are parsed scheme-neutrally during resolution, so enforce the final
+  // HTTP scheme's required host before serializing an invalid HTTP URI. The
+  // scheme is not lowercased by parse, so compare it case-insensitively.
+  const resolvedScheme = resolved.scheme !== undefined ? String(resolved.scheme).toLowerCase() : undefined
+  if (
+    (resolvedScheme === 'http' || resolvedScheme === 'https') &&
+    !resolved.host
+  ) {
+    throw new Error('HTTP URIs must have a host.')
+  }
   schemelessOptions.skipEscape = true
   return serialize(resolved, schemelessOptions)
 }
@@ -206,6 +234,15 @@ const URI_PARSE = /^(?:([^#/:?]+):)?(?:\/\/((?:([^#/?@]*)@)?(\[[^#/?\]]+\]|[^#/:
 // with or without a scheme prefix, for the literal-backslash rejection below.
 const AUTHORITY_PREFIX = /^(?:[^#/:?]+:)?\/\/([^/?#]*)/
 
+// Captures the leading authority-introducer region after an optional scheme: a
+// run of forward slashes, backslashes, and the characters the WHATWG URL parser
+// removes before parsing (TAB U+0009, LF U+000A, CR U+000D). A valid introducer
+// is exactly "//". Node treats "\" as "/" on special schemes and strips those
+// characters first, so forms like "\\", "/\", "\/", "/<TAB>/", or a leading
+// "<TAB>//" reach an authority in Node while fast-uri's URI_PARSE folds them into
+// the path group (host confusion / SSRF / redirect bypass).
+const AUTHORITY_INTRODUCER_REGION = /^(?:[^#/:?]+:)?([/\\\t\n\r]*)/
+
 /**
  * @param {import('./types/index').URIComponent} parsed
  * @param {RegExpMatchArray} matches
@@ -226,7 +263,7 @@ function getParseError (parsed, matches) {
 /**
  * @param {string} uri
  * @param {import('./types/index').Options} [opts]
- * @returns {{ parsed: import('./types/index').URIComponent, malformedAuthorityOrPort: boolean }}
+ * @returns {{ parsed: import('./types/index').URIComponent, malformedAuthorityOrPort: boolean, malformedReferenceEdge: boolean }}
  */
 function parseWithStatus (uri, opts) {
   const options = Object.assign({}, opts)
@@ -242,6 +279,12 @@ function parseWithStatus (uri, opts) {
   }
 
   let malformedAuthorityOrPort = false
+  // Check the caller's original reference before suffix mode prepends a scheme
+  // or authority marker and turns its leading edge into interior data.
+  const malformedReferenceEdge = uri.length !== 0 && (
+    uri.charCodeAt(0) <= 0x20 ||
+    uri.charCodeAt(uri.length - 1) <= 0x20
+  )
 
   let isIP = false
   if (options.reference === 'suffix') {
@@ -263,6 +306,32 @@ function parseWithStatus (uri, opts) {
   if (authorityMatch !== null && authorityMatch[1].indexOf('\\') !== -1) {
     parsed.error = 'URI authority must not contain a literal backslash.'
     malformedAuthorityOrPort = true
+  }
+
+  // Reject a malformed or whitespace-smuggled authority introducer. fast-uri
+  // only recognizes a literal "//"; anything else in the leading separator run
+  // (a backslash, or a "//" that appears only after removing the TAB/LF/CR that
+  // Node strips) means the authority fast-uri parses differs from the one Node's
+  // URL resolves. Reject rather than rewrite, mirroring the literal-backslash
+  // guard above. Percent-encoded forms (%5C, %09) are untouched, valid data.
+  const introducerMatch = uri.match(AUTHORITY_INTRODUCER_REGION)
+  if (introducerMatch !== null) {
+    const region = introducerMatch[1]
+    const normalizedRegion = region.replace(/[\t\n\r]/g, '')
+    // Two or more leading separators introduce an authority.
+    if (normalizedRegion.length >= 2) {
+      if (normalizedRegion.slice(0, 2) !== '//') {
+        parsed.error = parsed.error || 'URI authority must not contain a literal backslash.'
+        malformedAuthorityOrPort = true
+      } else if (region.length !== normalizedRegion.length) {
+        parsed.error = parsed.error || 'URI authority introducer must not contain whitespace.'
+        malformedAuthorityOrPort = true
+      }
+    }
+  }
+
+  if (malformedReferenceEdge) {
+    parsed.error = parsed.error || 'URI must not contain leading or trailing C0 controls or spaces.'
   }
 
   const matches = uri.match(URI_PARSE)
@@ -358,7 +427,7 @@ function parseWithStatus (uri, opts) {
   } else {
     parsed.error = parsed.error || 'URI can not be parsed.'
   }
-  return { parsed, malformedAuthorityOrPort }
+  return { parsed, malformedAuthorityOrPort, malformedReferenceEdge }
 }
 
 /**
@@ -382,13 +451,14 @@ function normalizeString (uri, opts) {
 /**
  * @param {string} uri
  * @param {import('./types/index').Options} [opts]
- * @returns {{ normalized: string, malformedAuthorityOrPort: boolean }}
+ * @returns {{ normalized: string, malformedAuthorityOrPort: boolean, malformedReferenceEdge: boolean }}
  */
 function normalizeStringWithStatus (uri, opts) {
-  const { parsed, malformedAuthorityOrPort } = parseWithStatus(uri, opts)
+  const { parsed, malformedAuthorityOrPort, malformedReferenceEdge } = parseWithStatus(uri, opts)
   return {
-    normalized: malformedAuthorityOrPort ? uri : serialize(parsed, opts),
-    malformedAuthorityOrPort
+    normalized: malformedAuthorityOrPort || malformedReferenceEdge ? uri : serialize(parsed, opts),
+    malformedAuthorityOrPort,
+    malformedReferenceEdge
   }
 }
 
@@ -399,8 +469,8 @@ function normalizeStringWithStatus (uri, opts) {
  */
 function normalizeComparableURI (uri, opts) {
   if (typeof uri === 'string') {
-    const { normalized, malformedAuthorityOrPort } = normalizeStringWithStatus(uri, opts)
-    return malformedAuthorityOrPort ? undefined : normalized
+    const { normalized, malformedAuthorityOrPort, malformedReferenceEdge } = normalizeStringWithStatus(uri, opts)
+    return malformedAuthorityOrPort || malformedReferenceEdge ? undefined : normalized
   }
 
   if (typeof uri === 'object') {
